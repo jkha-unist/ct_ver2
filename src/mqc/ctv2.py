@@ -22,23 +22,23 @@ class CTv2(MQC):
         :param double rho_threshold: Electronic density threshold for decoherence term calculation
         :param init_coefs: Initial BO coefficient
         :type init_coefs: double, 2D list or complex, 2D list
-        :param double dist_parameter: Distance parameter to contruct Gaussian and determine quantum momentum center
-        :param double min_sigma: Minimum sigma value
-        :param double const_dist_cutoff: Distance cutoff to construct Gaussian
-        :param double const_center_cutoff: Distance cutoff to determine quantum momentum center
         :param string unit_dt: Unit of time interval
         :param integer out_freq: Frequency of printing output
         :param integer verbosity: Verbosity of output
+        :param boolean l_crunch: Perform CTv2
+        :param boolean l_dc_w_mom: Use state-wise momentum for the phase term
+        :param boolean l_traj_gaussian: Use the sum of trajectory centered Gaussians for the nuclear density
+        :param integer t_cons: Average population conservation scheme. 0: none, 1: Scaling (only for l_lap=True), 2: Shift
+        :param boolean l_etot0: Use the constant total energy (at t=0) for the state-wise momentum calculation
+        :param boolean l_lap: Include laplacian ENC term
     """
     def __init__(self, molecules, thermostat=None, istates=None, dt=0.5, nsteps=1000, nesteps=20, \
         elec_object="coefficient", propagator="rk4", l_print_dm=True, l_adj_nac=True, rho_threshold=0.01, \
-        init_coefs=None, dist_parameter=10., min_sigma=0.3, const_dist_cutoff=None, const_center_cutoff=None, \
+        init_coefs=None, unit_dt="fs", out_freq=1, verbosity=0, \
+        l_crunch=True, l_dc_w_mom=True, l_traj_gaussian=False, \
+        t_cons=2, l_etot0=True, l_lap=False,\
         l_en_cons=False, l_sigma_artifact=False, artifact_expon=0.2, l_asymp=False, x_fin=25.0, \
-        l_crunch=True, l_uniform_center=False, t_pc=0, l_traj_gaussian=False,\
-        l_real_pop=False, l_pc_w_phase_term=False, l_dc_w_mom=False, l_lap=False, t_cons=0, l_etot0=False,\
-        l_read_qmom=False, nxn=5001, xminn=-50.0, xmaxn=50.0, step_scale=10,\
-        qd_dir="/home/jkha/01_PROJECTS/03_ENC_analysis/02_ctv2/data/02_phase_correction/00_QD/05_WANG_only_qmom/30.0", \
-        unit_dt="fs", out_freq=1, verbosity=0):
+        l_real_pop=True, t_pc=1, l_uniform_center=False):
         # Save name of MQC dynamics
         self.md_type = self.__class__.__name__
 
@@ -115,10 +115,6 @@ class CTv2(MQC):
         self.upper_th = 1. - self.rho_threshold
         self.lower_th = self.rho_threshold
 
-        self.min_sigma = min_sigma
-        self.const_dist_cutoff = const_dist_cutoff
-        self.dist_parameter = dist_parameter
-        self.const_center_cutoff = const_center_cutoff
         self.artifact_expon = artifact_expon
 
         self.l_en_cons = l_en_cons
@@ -128,7 +124,6 @@ class CTv2(MQC):
         
         self.l_crunch = l_crunch
         self.l_real_pop = l_real_pop
-        self.l_pc_w_phase_term = l_pc_w_phase_term
         self.l_dc_w_mom = l_dc_w_mom
         self.l_uniform_center = l_uniform_center
         self.l_traj_gaussian = l_traj_gaussian
@@ -136,15 +131,6 @@ class CTv2(MQC):
         self.t_pc = t_pc
         self.t_cons = t_cons
         self.l_etot0 = l_etot0
-        self.l_read_qmom = l_read_qmom
-        if (l_read_qmom):
-            self.nxn = nxn
-            self.xminn = xminn 
-            self.xmaxn = xmaxn 
-            self.dxn = (xmaxn - xminn) / (nxn - 1)
-            self.step_scale = step_scale
-            self.qd_dir = qd_dir
-        
 
         # Variables for aborting dynamics when all trajectories reach asymptotic region
         self.l_asymp = l_asymp
@@ -198,11 +184,7 @@ class CTv2(MQC):
             if (self.t_pc != 0):
                 self.get_dS()
 
-
-            if (self.l_read_qmom):
-                self.read_qmom(self.istep+1)
-            else:
-                self.calculate_qmom(self.istep)
+            self.calculate_qmom(self.istep)
             
             if (self.l_lap):
                 self.get_d2S()
@@ -274,10 +256,7 @@ class CTv2(MQC):
             if (self.t_pc != 0):
                 self.get_dS()
             
-            if (self.l_read_qmom):
-                self.read_qmom(istep+1)
-            else:
-                self.calculate_qmom(istep)
+            self.calculate_qmom(istep)
             
             if (self.l_lap):
                 self.get_d2S()
@@ -318,10 +297,7 @@ class CTv2(MQC):
                     shutil.rmtree(tmp_dir)
     
     def get_dS(self):
-        if(self.l_pc_w_phase_term):
-            self.dS[:, :, :, :] = self.phase[:, :, :, :]
-        else:
-            self.dS[:, :, :, :] = self.mom[:, :, :, :]
+        self.dS[:, :, :, :] = self.mom[:, :, :, :]
     
     def get_d2S(self):
         
@@ -332,58 +308,6 @@ class CTv2(MQC):
                 #    self.d2S[itraj, ist, :] -= self.d2e[itraj, ist, :] * self.dt
                 self.d2S[itraj, ist, :] -= self.d2e[itraj, ist, :] * self.dt
             
-        ## Rescale d2S
-        #if (self.t_cons == 1):
-        #    deno = np.zeros((self.nst_pair, self.nat_qm))
-        #    numer = np.zeros((self.nst_pair, self.nat_qm))
-        #    index_lk = -1
-        #    for ist in range(self.nst):
-        #        for jst in range(ist+1, self.nst):
-        #            index_lk += 1
-        #            for iat in range(self.nat_qm):
-        #                deno[index_lk, iat] = 0.0
-        #                numer[index_lk, iat] = 0.0
-        #                for itraj in range(self.ntrajs):
-        #                    if (self.l_coh[itraj, ist] and self.l_coh[itraj, jst]):
-        #                        numer[index_lk, iat] += \
-        #                            - np.sum((self.qmom_bo[itraj, index_lk, iat, :] - self.qmom[itraj, index_lk, iat, :]) * (self.phase[itraj, ist, iat, :] - self.phase[itraj, jst, iat, :])) \
-        #                            * self.mols[itraj].rho.real[ist, ist] * self.mols[itraj].rho.real[jst, jst]
-        #                        deno[index_lk, iat] += (self.d2S[itraj, ist, iat] - self.d2S[itraj, jst, iat]) * self.mols[itraj].rho.real[ist, ist] * self.mols[itraj].rho.real[jst, jst]
-
-        #                if (abs(deno[index_lk, iat]) < self.small):
-        #                    self.alpha[index_lk, iat] = 0.0
-        #                else:
-        #                    self.alpha[index_lk, iat] = numer[index_lk, iat] / deno[index_lk, iat]
-
-        #elif (self.t_cons == 2):
-        #    self.alpha[:, :] = 1.0
-        #    deno = np.zeros((self.nst_pair))
-        #    numer = np.zeros((self.nst_pair, self.nat_qm))
-        #    index_lk = -1
-        #    for ist in range(self.nst):
-        #        for jst in range(ist+1, self.nst):
-        #            index_lk += 1
-        #            deno[index_lk] = 0.0
-        #            for itraj in range(self.ntrajs):
-        #                deno[index_lk] +=  self.mols[itraj].rho.real[ist, ist] * self.mols[itraj].rho.real[jst, jst]
-        #            
-        #            if (abs(deno[index_lk]) < self.small):
-        #                self.beta[index_lk, :] = 0.0
-        #            else:
-        #                for iat in range(self.nat_qm):
-        #                    numer[index_lk, iat] = 0.0
-        #                    for itraj in range(self.ntrajs):
-        #                        if (self.l_coh[itraj, ist] and self.l_coh[itraj, jst]):
-        #                            numer[index_lk, iat] += \
-        #                                - np.sum((self.qmom_bo[itraj, index_lk, iat, :] - self.qmom[itraj, index_lk, iat, :]) * (self.phase[itraj, ist, iat, :] - self.phase[itraj, jst, iat, :])) \
-        #                                * self.mols[itraj].rho.real[ist, ist] * self.mols[itraj].rho.real[jst, jst]
-        #                            numer[index_lk, iat] += - (self.d2S[itraj, ist, iat] - self.d2S[itraj, jst, iat]) * self.mols[itraj].rho.real[ist, ist] * self.mols[itraj].rho.real[jst, jst]
-
-        #                    self.beta[index_lk, iat] = numer[index_lk, iat] / deno[index_lk]
-        #else:
-        #    self.alpha[:, :] = 1.0
-        #    self.beta[:, :] = 0.0
-
     def set_avg_pop_cons(self):
         
         # Rescale d2S
@@ -413,7 +337,7 @@ class CTv2(MQC):
                             self.alpha[index_lk, iat] = 0.0
                         else:
                             self.alpha[index_lk, iat] = numer[index_lk, iat] / deno[index_lk, iat]
-        # Or add const
+        # Or add const: beta (\Delta_{ij} in the paper and note)
         elif (self.t_cons == 2):
             self.alpha[:, :] = 1.0
             deno = np.zeros((self.nst_pair))
@@ -630,73 +554,6 @@ class CTv2(MQC):
                 else:
                     self.mol.states[ist].coef = 0. + 0.j
 
-    def read_qmom(self, istep):
-        """ Routine to read quantum momentum
-
-            :param integer istep: Current MD step
-        """
-        qd_step = self.step_scale * istep 
-        qmom_file = self.qd_dir + "/QMOM.DAT." + f"{qd_step}"
-        
-        with open(qmom_file, 'r') as f_qmom:
-            lines = f_qmom.readlines()
-        
-        for itraj in range(self.ntrajs):
-            
-            self.mol = self.mols[itraj]
-            
-            rho = self.mol.rho[0, 0].real
-
-            if (rho > self.upper_th or rho < self.lower_th):
-                self.qmom[itraj, :, :, :] = 0.0 
-                continue
-            
-            ix = 0
-            x1 = 0.0
-            rx = self.mol.pos[0, 0]
-            
-            ix = int(np.floor((rx - self.xminn)/self.dxn))
-            x1 = self.xminn + ix * self.dxn
-            
-            ltmp = lines[ix].strip().split()
-            ltmp2 = []
-            for a in ltmp:
-                ltmp2.append(to_zero(a))
-            line1 = np.array(ltmp2, dtype=np.float64)
-            
-            ltmp = lines[ix+1].strip().split()
-            ltmp2 = []
-            for a in ltmp:
-                ltmp2.append(to_zero(a))
-            line2 = np.array(ltmp2, dtype=np.float64)
-            
-            line_qmom = np.zeros(line2.shape[0])
-            line_qmom[:] = (line2[:] - line1[:])/self.dxn * (rx - x1) + line1[:]
-            
-            self.qmom[itraj, 0, 0, 0] = line_qmom[0]
-            self.qmom_bo[itraj, 0, 0, 0] = line_qmom[1] + line_qmom[2]
-
-        # 5. Calculate 2 * Qmom * phase / mass
-        # \sum_\nu (\nabla_\nu|\chi_i|^2 / |\chi_i|^2  + \nabla_\nu|\chi_j|^2/|\chi_j|^2 - \nabla_nu|\chi|^2) / (2*M_\nu)
-        self.K = np.zeros((self.ntrajs, self.nst, self.nst))
-        self.K_bo = np.zeros((self.ntrajs, self.nst, self.nst))
-        for itraj in range(self.ntrajs):
-            index_lk = -1
-            for ist in range(self.nst):
-                for jst in range(ist + 1, self.nst):
-                    index_lk += 1
-                    if (self.l_coh[itraj, ist] and self.l_coh[itraj, jst]):
-                        self.K[itraj, ist, jst] = 0.5 * np.sum(1. / self.mol.mass[0:self.nat_qm] * \
-                            np.sum(self.qmom[itraj, index_lk] * (self.phase[itraj, ist] - self.phase[itraj, jst]), axis = 1))
-                        self.K[itraj, jst, ist] = - self.K[itraj, ist, jst]
-                        if (self.l_crunch):
-                            self.K_bo[itraj, ist, jst] = 0.5 * np.sum(1. / self.mol.mass[0:self.nat_qm] * \
-                                np.sum(self.qmom_bo[itraj, index_lk] * (self.phase[itraj, ist] - self.phase[itraj, jst]), axis = 1))
-                            
-                            #if (self.l_lap):
-                            #    self.K_bo[itraj, ist, jst] += 0.5 * np.sum(1. / self.mol.mass[0:self.nat_qm] * (self.d2S[itraj, ist, :] - self.d2S[itraj, jst, :]))
-                            
-                            self.K_bo[itraj, jst, ist] = - self.K_bo[itraj, ist, jst]
     def calculate_qmom(self, istep):
         """ Routine to calculate quantum momentum
 
@@ -715,9 +572,9 @@ class CTv2(MQC):
         self.calculate_center()
         
         # 4. Compute quantum momentum
-        # (\nabla_\nu|\chi_i|^2 / |\chi_i|^2  + \nabla_\nu|\chi_j|^2/|\chi_j|^2 - \nabla_\nu|\chi|^2 / |\chi|^2)
-        # or
-        # \nabla_\nu|\chi|^2 / |\chi|^2
+        # G_{\nu, ij} = (\nabla_\nu|\chi_i|^2 / |\chi_i|^2  + \nabla_\nu|\chi_j|^2/|\chi_j|^2)
+        # and/or
+        # P_{\nu} = \nabla_\nu|\chi|^2 / |\chi|^2
         if (self.l_uniform_center):
             for itraj in range(self.ntrajs):
                 index_lk = -1
@@ -737,8 +594,10 @@ class CTv2(MQC):
                         if (self.l_crunch):
                             self.qmom_bo[itraj, index_lk] = self.slope_bo[itraj, index_lk] * self.mols[itraj].pos - self.intercept_bo[itraj, index_lk]
 
-        # 5. Calculate 2 * Qmom * phase / mass
-        # \sum_\nu (\nabla_\nu|\chi_i|^2 / |\chi_i|^2  + \nabla_\nu|\chi_j|^2/|\chi_j|^2 - \nabla_nu|\chi|^2) / (2*M_\nu)
+        # 5. Calculate
+        # K_bo = 0.5 * G_{\nu, ij}/M \cdot D_{ij} 
+        # and/or
+        # K = 0.5 * P_{\nu}/M \cdot D_{ij}
         self.K = np.zeros((self.ntrajs, self.nst, self.nst))
         self.K_bo = np.zeros((self.ntrajs, self.nst, self.nst))
         for itraj in range(self.ntrajs):
@@ -890,14 +749,20 @@ class CTv2(MQC):
                                         (1.0 / self.sigma[ist, iat, isp] ** 2 + 1.0 / self.sigma[jst, iat, isp] ** 2)
         
     def calculate_center(self):
-        """ Routine to calculate center of quantum momentum
+        """ Routine to calculate center or intercept of quantum momentum
         """
         rho = np.zeros((self.ntrajs, self.nst))
         for itraj in range(self.ntrajs):
             for ist in range(self.nst):
                 rho[itraj, ist] = self.mols[itraj].rho[ist, ist].real
 
-        if (self.l_uniform_center):
+        if (self.l_uniform_center): 
+            
+            # Enforces average population conservation by assigning an identical center to all trajectories.
+            # This setting significantly overestimates decoherence when l_traj_gaussian=True, as the narrow width of the Gaussian basis results in an excessively steep slope.
+            # It is recommended to avoid this option and use the t_cons=2 setting instead.
+            # Or only use with l_traj_gaussian=False.
+
             deno = np.zeros((self.nst_pair, self.nat_qm, self.ndim)) # denominator
             numer = np.zeros((self.nst_pair, self.nat_qm, self.ndim)) # numerator
             deno_bo = np.zeros((self.nst_pair, self.nat_qm, self.ndim)) # denominator
@@ -1168,19 +1033,14 @@ class CTv2(MQC):
         {"CTMQC Information":>43s}
         {"-" * 68}
           rho_threshold            = {self.rho_threshold:>16f}
-          dist_parameter           = {self.dist_parameter:>16f}
-          min_sigma                = {self.min_sigma:>16f}
+          l_crunch                 = {self.l_crunch:>16}
+          l_dc_w_mom               = {self.l_dc_w_mom:>16}
+          l_traj_gaussian          = {self.l_traj_gaussian:>16}
+          t_cons                   = {self.t_cons:>16d}
+          l_etot0                  = {self.l_etot0:>16}
+          l_lap                    = {self.l_lap:>16}
         """)
 
-        if (self.const_dist_cutoff != None):
-            ct_info += f"  const_dist_cutoff        = {self.const_dist_cutoff:>16f}\n"
-        else:
-            ct_info += f"  const_dist_cutoff        = {str(None):>16s}\n"
-
-        if (self.const_center_cutoff != None):
-            ct_info += f"  const_center_cutoff      = {self.const_center_cutoff:>16f}\n"
-        else:
-            ct_info += f"  const_center_cutoff      = {str(None):>16s}\n"
         print (ct_info, flush=True)
 
         # Print istate
