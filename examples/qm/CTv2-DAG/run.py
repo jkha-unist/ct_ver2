@@ -53,5 +53,4 @@ md = mqc.CTv2(molecules=mols, istates=istates, dt=t, nsteps=nstep, nesteps=20, \
 md.run(qm=bo, output_dir=top_path)
 
 del mol, mols, md, bo
-gc.collect()
 
