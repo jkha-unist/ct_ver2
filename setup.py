@@ -1,0 +1,56 @@
+from distutils.core import setup
+from distutils.extension import Extension
+from Cython.Distutils import build_ext
+
+import numpy as np
+
+# Selects the type of math libraries to be used; Available options: lapack, mkl
+math_lib_type = "mkl"
+#math_lib_type = "lapack"
+# Directories including the math libraries
+math_lib_dir = "${MKLROOT}/lib/intel64/"
+#math_lib_dir = "/my_disk/my_name/lapack/"
+
+sourcefile1 = ["./src/mqc/el_prop/el_propagator.pyx", "./src/mqc/el_prop/rk4.c", "./src/mqc/el_prop/exponential.c"]
+sourcefile2 = ["./src/mqc/el_prop/el_propagator_xf.pyx", "./src/mqc/el_prop/rk4_xf.c"]
+sourcefile3 = ["./src/mqc/el_prop/el_propagator_ct.pyx", "./src/mqc/el_prop/rk4_ct.c"]
+sourcefile4 = ["./src/qm/cioverlap/cioverlap.pyx", "./src/qm/cioverlap/tdnac.c"]
+sourcefile5 = ["./src/mqc/el_prop/el_propagator_ctv2.pyx", "./src/mqc/el_prop/rk4_ctv2.c"]
+sourcefile6 = ["./src/mqc/el_prop/el_propagator_xfv2.pyx", "./src/mqc/el_prop/rk4_xfv2.c"]
+
+# External libraries to be linked
+libs = []
+# Directories for linking external libraries
+lib_dirs = []
+# Extra flags for compilation
+extra_flags = ["-std=c99"]
+
+if (math_lib_type == "lapack"):
+    libs += ["lapack", "refblas", "gfortran"]
+    lib_dirs += [math_lib_dir]
+    extra_flags += ["-D HAVE_LAPACK"]
+elif (math_lib_type == "mkl"):
+    #libs += ["mkl_intel_lp64", "mkl_sequential", "mkl_core", ":libmkl_avx512.so.1"]
+    libs += ["mkl_intel_lp64", "mkl_sequential", "mkl_core"]
+    lib_dirs += [math_lib_dir]
+    extra_flags += ["-D HAVE_MKL"]
+else:
+    error_message = "Invalid type of math libraries is given!"
+    error_vars = f"math_lib_type = {math_lib_type}"
+    raise ValueError (f"( setup.py ) {error_message} ( {error_vars} )")
+
+extensions = [
+    Extension("el_propagator", sources=sourcefile1,  include_dirs=[np.get_include()], \
+        libraries=libs, library_dirs=lib_dirs, extra_compile_args=["-std=c99"]),
+    Extension("el_propagator_xf", sources=sourcefile2, include_dirs=[np.get_include()], extra_compile_args=["-std=c99"]),
+    Extension("el_propagator_ct", sources=sourcefile3, include_dirs=[np.get_include()], extra_compile_args=["-std=c99"]),
+    Extension("cioverlap", sources=sourcefile4, include_dirs=[np.get_include()], \
+        libraries=libs, library_dirs=lib_dirs, extra_compile_args=extra_flags),
+    Extension("el_propagator_ctv2", sources=sourcefile5, include_dirs=[np.get_include()], extra_compile_args=["-std=c99"]),
+    Extension("el_propagator_xfv2", sources=sourcefile6, include_dirs=[np.get_include()], extra_compile_args=["-std=c99"])
+]
+
+setup(
+    cmdclass = {"build_ext": build_ext},
+    ext_modules = extensions
+)
