@@ -31,14 +31,20 @@ class CTv2(MQC):
         :param integer t_cons: Average population conservation scheme. 0: none, 1: Scaling (only for l_lap=True), 2: Shift
         :param boolean l_etot0: Use the constant total energy (at t=0) for the state-wise momentum calculation
         :param boolean l_lap: Include laplacian ENC term
+        :param boolean l_en_cons: Adjust momentum at every time step to enforce the total energy conservation
+        :param double artifact_expon: Exponent for width for nuclear density estimation (used only when l_traj_gaussian = True)
+        :param boolean l_asymp: Terminate dynamics when the trajectory reaches asymptotic region (use this option for model systems only)
+        :param double x_fin: Define asymptotic region (a.u.)
+        :param boolean l_real_pop: Use |C_j|^2 for |\chi_j|^2/|\chi|^2 in quantum momentum calculation.
+        :param integer t_pc: Phase correction scheme (1: use P, 2: use \sum_j \nabla S_j)
     """
     def __init__(self, molecules, thermostat=None, istates=None, dt=0.5, nsteps=1000, nesteps=20, \
         elec_object="coefficient", propagator="rk4", l_print_dm=True, l_adj_nac=True, rho_threshold=0.01, \
         init_coefs=None, unit_dt="fs", out_freq=1, verbosity=0, \
         l_crunch=True, l_dc_w_mom=True, l_traj_gaussian=False, \
         t_cons=2, l_etot0=True, l_lap=False,\
-        l_en_cons=False, l_sigma_artifact=False, artifact_expon=0.2, l_asymp=False, x_fin=25.0, \
-        l_real_pop=True, t_pc=1, l_uniform_center=False):
+        l_en_cons=False, artifact_expon=0.2, l_asymp=False, x_fin=25.0, \
+        l_real_pop=True, t_pc=1):
         # Save name of MQC dynamics
         self.md_type = self.__class__.__name__
 
@@ -77,33 +83,33 @@ class CTv2(MQC):
             self.mols[itraj].get_coefficient(self.init_coefs[itraj], self.istates[itraj])
 
         # Initialize variables for CTMQC
-        self.phase = np.zeros((self.ntrajs, self.nst, self.nat_qm, self.ndim))
-        self.nst_pair = int(self.nst * (self.nst - 1) / 2)
-        self.qmom = np.zeros((self.ntrajs, self.nst_pair, self.nat_qm, self.ndim))
-        self.qmom_bo = np.zeros((self.ntrajs, self.nst_pair, self.nat_qm, self.ndim))
-        self.K = np.zeros((self.ntrajs, self.nst, self.nst))
-        self.K_bo = np.zeros((self.ntrajs, self.nst, self.nst))
-        self.mom = np.zeros((self.ntrajs, self.nst, self.nat_qm, self.ndim))
-        self.dS = np.zeros((self.ntrajs, self.nst, self.nat_qm, self.ndim))
-        self.d2e = np.zeros((self.ntrajs, self.nst, self.nat_qm))
-        self.d2S = np.zeros((self.ntrajs, self.nst, self.nat_qm))
-        self.alpha = np.zeros((self.nst_pair, self.nat_qm))
-        self.beta = np.zeros((self.nst_pair, self.nat_qm))
-        self.etot0 = np.zeros((self.ntrajs))
-        self.l_coh = np.zeros((self.ntrajs, self.nst), dtype=bool)
-        self.l_first = np.zeros((self.ntrajs, self.nst), dtype=bool)
+        self.phase = np.zeros((self.ntrajs, self.nst, self.nat_qm, self.ndim)) # phase term, same as self.dS if l_dc_w_mom=True
+        self.nst_pair = int(self.nst * (self.nst - 1) / 2) # number of state pair
+        self.qmom = np.zeros((self.ntrajs, self.nat_qm, self.ndim)) # total quantum momentum: \mathcal{P}_\nu = \nabla_\nu|\chi|^2 / |\chi|^2
+        self.qmom_bo = np.zeros((self.ntrajs, self.nst_pair, self.nat_qm, self.ndim)) # projected quantum momentum: \mathcal{G}_{\nu,ij} =\nabla_\nu|\chi_i|^2 / |\chi_i|^2 + \nabla_\nu|\chi_j|^2 / |\chi_j|^2
+        self.K = np.zeros((self.ntrajs, self.nst, self.nst)) # Decoherence term from total quantum momentum: \sum_\nu 1/(2M_\nu) \mathcal{P}_\nu \cdot \nabla_\nu (S_i - S_j)
+        self.K_bo = np.zeros((self.ntrajs, self.nst, self.nst)) # Decoherence term from projected quantum momentum: \sum_\nu 1/(2M_\nu) \mathcal{G}_{\nu,ij} \cdot \nabla_\nu (S_i - S_j)
+        self.mom = np.zeros((self.ntrajs, self.nst, self.nat_qm, self.ndim)) # state-wise momentum
+        self.dS = np.zeros((self.ntrajs, self.nst, self.nat_qm, self.ndim)) # phase term used in phase correction
+        self.d2e = np.zeros((self.ntrajs, self.nst, self.nat_qm)) # Laplacian of BO energy
+        self.d2S = np.zeros((self.ntrajs, self.nst, self.nat_qm)) # Laplacian of S_i's 
+        self.alpha = np.zeros((self.nst_pair, self.nat_qm)) # Scaling factor
+        self.beta = np.zeros((self.nst_pair, self.nat_qm)) # Shift factor
+        self.etot0 = np.zeros((self.ntrajs)) # Total energy at t=0
+        self.l_coh = np.zeros((self.ntrajs, self.nst), dtype=bool) # Flag that a trajectory is in coherence
+        self.l_first = np.zeros((self.ntrajs, self.nst), dtype=bool) # Flag that a trajectory become coherent
 
         # Initialize variables to calculate quantum momentum 
         self.count_ntrajs = np.ones((self.ntrajs, self.nat_qm, self.ndim)) * self.ntrajs
-        self.sigma = np.zeros((self.nst, self.nat_qm, self.ndim))
-        self.slope = np.zeros((self.ntrajs, self.nst_pair, self.nat_qm, self.ndim))
-        self.intercept = np.zeros((self.ntrajs, self.nst_pair, self.nat_qm, self.ndim))
+        self.sigma = np.zeros((self.nst, self.nat_qm, self.ndim)) 
+        self.slope = np.zeros((self.ntrajs, self.nat_qm, self.ndim))
+        self.intercept = np.zeros((self.ntrajs, self.nat_qm, self.ndim))
         self.slope_bo = np.zeros((self.ntrajs, self.nst_pair, self.nat_qm, self.ndim))
         self.intercept_bo = np.zeros((self.ntrajs, self.nst_pair, self.nat_qm, self.ndim))
-        self.g_i = np.zeros((self.ntrajs)) 
-        self.prod_g_i = np.ones((self.nst, self.ntrajs))
-        self.prod_g_ij = np.ones((self.nst, self.ntrajs, self.ntrajs))
-        self.center = np.zeros((self.ntrajs, self.nst_pair, self.nat_qm, self.ndim))
+        self.g_I = np.zeros((self.ntrajs)) # |\chi|^2
+        self.g_i_I = np.ones((self.nst, self.ntrajs)) # |\chi_i|^2
+        self.g_i_IJ = np.ones((self.nst, self.ntrajs, self.ntrajs)) # Gaussian basis for |\chi_i|^2 when l_traj_gaussian=True
+        self.center = np.zeros((self.ntrajs, self.nat_qm, self.ndim))
         self.center_bo = np.zeros((self.ntrajs, self.nst_pair, self.nat_qm, self.ndim))
         self.avg_R = np.zeros((self.nst, self.nat_qm, self.ndim))
         self.pseudo_pop = np.zeros((self.nst, self.ntrajs))
@@ -118,14 +124,12 @@ class CTv2(MQC):
         self.artifact_expon = artifact_expon
 
         self.l_en_cons = l_en_cons
-        self.l_sigma_artifact = l_sigma_artifact
         self.dotpopnac = np.zeros((self.ntrajs, self.nst))
         self.dotpopdec = np.zeros((self.ntrajs, self.nst))
         
         self.l_crunch = l_crunch
         self.l_real_pop = l_real_pop
         self.l_dc_w_mom = l_dc_w_mom
-        self.l_uniform_center = l_uniform_center
         self.l_traj_gaussian = l_traj_gaussian
         self.l_lap = l_lap
         self.t_pc = t_pc
@@ -184,7 +188,7 @@ class CTv2(MQC):
             if (self.t_pc != 0):
                 self.get_dS()
 
-            self.calculate_qmom(self.istep)
+            self.calculate_qmom()
             
             if (self.l_lap):
                 self.get_d2S()
@@ -256,7 +260,7 @@ class CTv2(MQC):
             if (self.t_pc != 0):
                 self.get_dS()
             
-            self.calculate_qmom(istep)
+            self.calculate_qmom()
             
             if (self.l_lap):
                 self.get_d2S()
@@ -325,11 +329,11 @@ class CTv2(MQC):
                             if (self.l_coh[itraj, ist] and self.l_coh[itraj, jst]):
                                 if (self.l_crunch):
                                     numer[index_lk, iat] += \
-                                        - np.sum((self.qmom_bo[itraj, index_lk, iat, :] - self.qmom[itraj, index_lk, iat, :]) * (self.phase[itraj, ist, iat, :] - self.phase[itraj, jst, iat, :])) \
+                                        - np.sum((self.qmom_bo[itraj, index_lk, iat, :] - self.qmom[itraj, iat, :]) * (self.phase[itraj, ist, iat, :] - self.phase[itraj, jst, iat, :])) \
                                         * self.mols[itraj].rho.real[ist, ist] * self.mols[itraj].rho.real[jst, jst]
                                 else:
                                     numer[index_lk, iat] += \
-                                        - np.sum((self.qmom[itraj, index_lk, iat, :]) * (self.phase[itraj, ist, iat, :] - self.phase[itraj, jst, iat, :])) \
+                                        - np.sum((self.qmom[itraj, iat, :]) * (self.phase[itraj, ist, iat, :] - self.phase[itraj, jst, iat, :])) \
                                         * self.mols[itraj].rho.real[ist, ist] * self.mols[itraj].rho.real[jst, jst]
                                 deno[index_lk, iat] += (self.d2S[itraj, ist, iat] - self.d2S[itraj, jst, iat]) * self.mols[itraj].rho.real[ist, ist] * self.mols[itraj].rho.real[jst, jst]
 
@@ -337,6 +341,7 @@ class CTv2(MQC):
                             self.alpha[index_lk, iat] = 0.0
                         else:
                             self.alpha[index_lk, iat] = numer[index_lk, iat] / deno[index_lk, iat]
+
         # Or add const: beta (\Delta_{ij} in the paper and note)
         elif (self.t_cons == 2):
             self.alpha[:, :] = 1.0
@@ -359,11 +364,11 @@ class CTv2(MQC):
                                 if (self.l_coh[itraj, ist] and self.l_coh[itraj, jst]):
                                     if (self.l_crunch):
                                         numer[index_lk, iat] += \
-                                            - np.sum((self.qmom_bo[itraj, index_lk, iat, :] - self.qmom[itraj, index_lk, iat, :]) * (self.phase[itraj, ist, iat, :] - self.phase[itraj, jst, iat, :])) \
+                                            - np.sum((self.qmom_bo[itraj, index_lk, iat, :] - self.qmom[itraj, iat, :]) * (self.phase[itraj, ist, iat, :] - self.phase[itraj, jst, iat, :])) \
                                             * self.mols[itraj].rho.real[ist, ist] * self.mols[itraj].rho.real[jst, jst]
                                     else:
                                         numer[index_lk, iat] += \
-                                            - np.sum((self.qmom[itraj, index_lk, iat, :]) * (self.phase[itraj, ist, iat, :] - self.phase[itraj, jst, iat, :])) \
+                                            - np.sum((self.qmom[itraj, iat, :]) * (self.phase[itraj, ist, iat, :] - self.phase[itraj, jst, iat, :])) \
                                             * self.mols[itraj].rho.real[ist, ist] * self.mols[itraj].rho.real[jst, jst]
                                     if (self.l_lap):
                                         numer[index_lk, iat] += - (self.d2S[itraj, ist, iat] - self.d2S[itraj, jst, iat]) * self.mols[itraj].rho.real[ist, ist] * self.mols[itraj].rho.real[jst, jst]
@@ -431,24 +436,12 @@ class CTv2(MQC):
                             (self.phase[itrajectory, ist] - self.phase[itrajectory, jst]) * \
                             self.mol.rho.real[ist, ist] * self.mol.rho.real[jst, jst]
 
-            #index_lk = -1
-            #for ist in range(self.nst):
-            #    for jst in range(ist+1, self.nst):
-            #        index_lk += 1
-            #        ctforce += 0.5 * (self.qmom_bo[itrajectory, index_lk] - 2.0 * self.qmom[itrajectory, index_lk]) * \
-            #            np.sum(np.sum((self.phase[itrajectory, ist] - self.phase[itrajectory, jst]) ** 2, axis=1) / self.mol.mass[0:self.nat_qm]) * \
-            #            self.mol.rho.real[ist, ist] * self.mol.rho.real[jst, jst]
         else:
             for ist in range(self.nst):
                 for jst in range(self.nst):
                     ctforce -= self.K[itrajectory, ist, jst] * \
                         (self.phase[itrajectory, ist] - self.phase[itrajectory, jst]) * \
                         self.mol.rho.real[ist, ist] * self.mol.rho.real[jst, jst]
-        #        ctforce += 0.5 * self.K_lk[itrajectory, ist, jst] * \
-        #            (self.phase[itrajectory, jst] - self.phase[itrajectory, ist]) * \
-        #            self.mol.rho.real[ist, ist] * self.mol.rho.real[jst, jst] * \
-        #            (self.mol.rho.real[ist, ist] + self.mol.rho.real[jst, jst])
-        #ctforce /= self.nst - 1
 
         # Finally, force is Ehrenfest force + CT force
         self.rforce += ctforce
@@ -554,16 +547,14 @@ class CTv2(MQC):
                 else:
                     self.mol.states[ist].coef = 0. + 0.j
 
-    def calculate_qmom(self, istep):
+    def calculate_qmom(self):
         """ Routine to calculate quantum momentum
-
-            :param integer istep: Current MD step
         """
         # _lk means state_pair dependency.
         # i and j are trajectory index.
         # -------------------------------------------------------------------
         # 1. Calculate variances for each trajectory
-        self.calculate_sigma(istep)
+        self.calculate_sigma()
 
         # 2. Calculate slope
         self.calculate_slope()
@@ -575,24 +566,14 @@ class CTv2(MQC):
         # G_{\nu, ij} = (\nabla_\nu|\chi_i|^2 / |\chi_i|^2  + \nabla_\nu|\chi_j|^2/|\chi_j|^2)
         # and/or
         # P_{\nu} = \nabla_\nu|\chi|^2 / |\chi|^2
-        if (self.l_uniform_center):
-            for itraj in range(self.ntrajs):
-                index_lk = -1
-                for ist in range(self.nst):
-                    for jst in range(ist + 1, self.nst):
-                        index_lk += 1
-                        self.qmom[itraj, index_lk] = self.slope[itraj, index_lk] * (self.mols[itraj].pos - self.center[itraj, index_lk])
-                        if (self.l_crunch):
-                            self.qmom_bo[itraj, index_lk] = self.slope_bo[itraj, index_lk] * (self.mols[itraj].pos - self.center_bo[itraj, index_lk])
-        else:
-            for itraj in range(self.ntrajs):
-                index_lk = -1
-                for ist in range(self.nst):
-                    for jst in range(ist + 1, self.nst):
-                        index_lk += 1
-                        self.qmom[itraj, index_lk] = self.slope[itraj, index_lk] * self.mols[itraj].pos - self.intercept[itraj, index_lk]
-                        if (self.l_crunch):
-                            self.qmom_bo[itraj, index_lk] = self.slope_bo[itraj, index_lk] * self.mols[itraj].pos - self.intercept_bo[itraj, index_lk]
+        for itraj in range(self.ntrajs):
+            self.qmom[itraj] = self.slope[itraj] * self.mols[itraj].pos - self.intercept[itraj]
+            index_lk = -1
+            for ist in range(self.nst):
+                for jst in range(ist + 1, self.nst):
+                    index_lk += 1
+                    if (self.l_crunch):
+                        self.qmom_bo[itraj, index_lk] = self.slope_bo[itraj, index_lk] * self.mols[itraj].pos - self.intercept_bo[itraj, index_lk]
 
         # 5. Calculate
         # K_bo = 0.5 * G_{\nu, ij}/M \cdot D_{ij} 
@@ -607,7 +588,7 @@ class CTv2(MQC):
                     index_lk += 1
                     if (self.l_coh[itraj, ist] and self.l_coh[itraj, jst]):
                         self.K[itraj, ist, jst] = 0.5 * np.sum(1. / self.mol.mass[0:self.nat_qm] * \
-                            np.sum(self.qmom[itraj, index_lk] * (self.phase[itraj, ist] - self.phase[itraj, jst]), axis = 1))
+                            np.sum(self.qmom[itraj] * (self.phase[itraj, ist] - self.phase[itraj, jst]), axis = 1))
                         self.K[itraj, jst, ist] = - self.K[itraj, ist, jst]
                         if (self.l_crunch):
                             self.K_bo[itraj, ist, jst] = 0.5 * np.sum(1. / self.mol.mass[0:self.nat_qm] * \
@@ -619,10 +600,8 @@ class CTv2(MQC):
                             self.K_bo[itraj, jst, ist] = - self.K_bo[itraj, ist, jst]
 
 
-    def calculate_sigma(self, istep):
+    def calculate_sigma(self):
         """ Routine to calculate variances for each trajectories
-
-            :param integer istep: Current MD step
         """
         pos = np.zeros((self.ntrajs, self.nat_qm, self.ndim))
         rho = np.zeros((self.ntrajs, self.nst))
@@ -641,7 +620,7 @@ class CTv2(MQC):
                 self.avg_R[ist, :, :] = np.tensordot(pos[:, :, :], rho[:, ist], axes=(0,0)) / rho_tmp
                 self.sigma[ist, :, :] = np.sqrt(np.tensordot(pos[:, :, :] ** 2, rho[:, ist], axes=(0,0)) / rho_tmp - self.avg_R[ist, :, :] ** 2)
         
-        if (self.l_traj_gaussian and self.l_sigma_artifact):
+        if (self.l_traj_gaussian):
             
             #iqr = np.zeros((self.nst, self.nat_qm, self.ndim))
             #rho_sort = np.zeros((self.ntrajs, self.nst))
@@ -680,28 +659,28 @@ class CTv2(MQC):
             for ist in range(self.nst):
                 rho[itraj, ist] = self.mols[itraj].rho.real[ist, ist]
         
-        self.g_i = np.zeros((self.ntrajs)) 
-        self.prod_g_i = np.ones((self.nst, self.ntrajs))
-        self.prod_g_ij = np.ones((self.nst, self.ntrajs, self.ntrajs))
+        self.g_I = np.zeros((self.ntrajs)) 
+        self.g_i_I = np.ones((self.nst, self.ntrajs))
+        self.g_i_IJ = np.ones((self.nst, self.ntrajs, self.ntrajs))
 
         for ist in range(self.nst):
             rho_tmp = np.sum(rho[:, ist]) / self.ntrajs
             if (rho_tmp < self.lower_th):
-                self.prod_g_i[ist, :] = 0.0
+                self.g_i_I[ist, :] = 0.0
             
             else: 
                 if (self.l_traj_gaussian):
                     for itraj in range(self.ntrajs):
-                        self.prod_g_i[ist, itraj] = 0.0
+                        self.g_i_I[ist, itraj] = 0.0
                         for jtraj in range(self.ntrajs):
                             for iat in range(self.nat_qm):
                                 for idim in range(self.ndim):
-                                    self.prod_g_ij[ist, itraj, jtraj] *= gaussian1d(self.mols[itraj].pos[iat, idim], 1., \
+                                    self.g_i_IJ[ist, itraj, jtraj] *= gaussian1d(self.mols[itraj].pos[iat, idim], 1., \
                                         self.sigma[ist, iat, idim], self.mols[jtraj].pos[iat, idim])
                             
-                            self.prod_g_ij[ist, itraj, jtraj] *= self.mols[jtraj].rho.real[ist, ist]
+                            self.g_i_IJ[ist, itraj, jtraj] *= self.mols[jtraj].rho.real[ist, ist] / self.ntrajs
 
-                            self.prod_g_i[ist, itraj] += self.prod_g_ij[ist, itraj, jtraj] 
+                            self.g_i_I[ist, itraj] += self.g_i_IJ[ist, itraj, jtraj] # |\chi_i|^2
                     
                 else:
                     for itraj in range(self.ntrajs):
@@ -709,12 +688,12 @@ class CTv2(MQC):
                             for idim in range(self.ndim):
                                 # gaussian1d(x, pre-factor, sigma, mean)
                                 # gaussian1d(R^{itraj}, 1.0, sigma^{jtraj}, R^{jtraj})
-                                self.prod_g_i[ist, itraj] *= gaussian1d(self.mols[itraj].pos[iat, idim], 1., \
+                                self.g_i_I[ist, itraj] *= gaussian1d(self.mols[itraj].pos[iat, idim], 1., \
                                     self.sigma[ist, iat, idim], self.avg_R[ist, iat, idim])
                 
-                    self.prod_g_i[ist, :] *= rho_tmp # \chi_i ?
+                    self.g_i_I[ist, :] *= rho_tmp # |\chi_i|^2
 
-        self.g_i[:] = np.sum(self.prod_g_i[:, :], axis=0) # \chi ?
+        self.g_I[:] = np.sum(self.g_i_I[:, :], axis=0) # |\chi|^2
         
         self.pseudo_pop = np.zeros((self.nst, self.ntrajs))
         
@@ -723,16 +702,16 @@ class CTv2(MQC):
                 self.pseudo_pop[:, itraj] = rho[itraj, :]
         else:
             for itraj in range(self.ntrajs):
-                if (self.g_i[itraj] < self.small):
+                if (self.g_I[itraj] < self.small):
                     pass
                 else:
                     for ist in range(self.nst):
-                        self.pseudo_pop[ist, itraj] = self.prod_g_i[ist, itraj] / self.g_i[itraj]
+                        self.pseudo_pop[ist, itraj] = self.g_i_I[ist, itraj] / self.g_I[itraj]
 
         for itraj in range(self.ntrajs):
             for iat in range(self.nat_qm):
                 for isp in range(self.ndim):
-                    self.slope[itraj, :, iat, isp] = - 1.0 * np.sum(self.pseudo_pop[:, itraj]  / self.sigma[:, iat, isp] ** 2)
+                    self.slope[itraj, iat, isp] = - 1.0 * np.sum(self.pseudo_pop[:, itraj]  / self.sigma[:, iat, isp] ** 2) # slope for total quantum momentum
         
         if (self.l_crunch):
             index_lk = -1
@@ -746,7 +725,7 @@ class CTv2(MQC):
                             else:
                                 for itraj in range(self.ntrajs):
                                     self.slope_bo[itraj, index_lk, iat, isp] = - 1.0 * \
-                                        (1.0 / self.sigma[ist, iat, isp] ** 2 + 1.0 / self.sigma[jst, iat, isp] ** 2)
+                                        (1.0 / self.sigma[ist, iat, isp] ** 2 + 1.0 / self.sigma[jst, iat, isp] ** 2) # slope for projected quantum momentum
         
     def calculate_center(self):
         """ Routine to calculate center or intercept of quantum momentum
@@ -756,107 +735,60 @@ class CTv2(MQC):
             for ist in range(self.nst):
                 rho[itraj, ist] = self.mols[itraj].rho[ist, ist].real
 
-        if (self.l_uniform_center): 
+        # Center is not actually used. Just to check.
+        # Intercepts for total and projected quantum momenta
+        for itraj in range(self.ntrajs):
+            for iat in range(self.nat_qm):
+                for isp in range(self.ndim):
+                    if (self.l_traj_gaussian):
+                        self.intercept[itraj, iat, isp] = 0.0
+                        if (self.g_I[itraj] / self.ntrajs < self.small):
+                            self.intercept[itraj, iat, isp] = 0.0
+                            self.center[itraj, iat, isp] = self.mols[itraj].pos[iat, isp]
+                        else:
+                            for jtraj in range(self.ntrajs):
+                                self.intercept[itraj, iat, isp] += -1.0 * \
+                                    np.sum((self.g_i_IJ[:, itraj, jtraj] * self.mols[jtraj].pos[iat, isp]) / self.sigma[:, iat, isp] ** 2) / self.g_I[itraj]
+                    else:
+                        self.intercept[itraj, iat, isp] = - 1.0 * \
+                            np.sum(self.pseudo_pop[:, itraj] * (self.avg_R[:, iat, isp] / self.sigma[:, iat, isp] ** 2))
             
-            # Enforces average population conservation by assigning an identical center to all trajectories.
-            # This setting significantly overestimates decoherence when l_traj_gaussian=True, as the narrow width of the Gaussian basis results in an excessively steep slope.
-            # It is recommended to avoid this option and use the t_cons=2 setting instead.
-            # Or only use with l_traj_gaussian=False.
+                    if (abs(self.slope[itraj, iat, isp]) < self.small):
+                        self.center[itraj, iat, isp] = self.mols[itraj].pos[iat, isp]
+                    else:
+                        self.center[itraj, iat, isp] = self.intercept[itraj, iat, isp] / self.slope[itraj, iat, isp]
 
-            deno = np.zeros((self.nst_pair, self.nat_qm, self.ndim)) # denominator
-            numer = np.zeros((self.nst_pair, self.nat_qm, self.ndim)) # numerator
-            deno_bo = np.zeros((self.nst_pair, self.nat_qm, self.ndim)) # denominator
-            numer_bo = np.zeros((self.nst_pair, self.nat_qm, self.ndim)) # numerator
-            for itraj in range(self.ntrajs):
-                index_lk = -1
-                for ist in range(self.nst):
-                    for jst in range(ist + 1, self.nst):  
-                        index_lk += 1
-                        deno[index_lk, :, :] += rho[itraj, ist] * rho[itraj, jst] * \
-                            (self.phase[itraj, ist, :, :] - self.phase[itraj, jst, :, :]) * self.slope[itraj, index_lk, :, :]
-                        numer[index_lk, :, :] += rho[itraj, ist] * rho[itraj, jst] * self.mols[itraj].pos[:, :] * \
-                            (self.phase[itraj, ist, :, :] - self.phase[itraj, jst, :, :]) * self.slope[itraj, index_lk, :, :]
-                        if (self.l_crunch):
-                            deno_bo[index_lk, :, :] += rho[itraj, ist] * rho[itraj, jst] * \
-                                (self.phase[itraj, ist, :, :] - self.phase[itraj, jst, :, :]) * self.slope_bo[itraj, index_lk, :, :]
-                            numer_bo[index_lk, :, :] += rho[itraj, ist] * rho[itraj, jst] * self.mols[itraj].pos[:, :] * \
-                                (self.phase[itraj, ist, :, :] - self.phase[itraj, jst, :, :]) * self.slope_bo[itraj, index_lk, :, :]
-            
-            for itraj in range(self.ntrajs):
-                index_lk = -1
-                for ist in range(self.nst):
-                    for jst in range(ist + 1, self.nst):
-                        index_lk += 1
+        if (self.l_crunch):
+            index_lk = -1
+            for ist in range(self.nst):
+                for jst in range(ist+1, self.nst):
+                    index_lk += 1
+                    for itraj in range(self.ntrajs):
                         for iat in range(self.nat_qm):
                             for isp in range(self.ndim):
-                                if (abs(deno[index_lk, iat, isp]) <= self.small):
-                                    self.center[itraj, index_lk, iat, isp] = self.mols[itraj].pos[iat, isp]
+                                if (self.sigma[ist, iat, isp] ** 2 < self.small or self.sigma[jst, iat, isp] ** 2 < self.small):
+                                    self.intercept_bo[itraj, index_lk, :, :] = 0.0
+                                    self.center_bo[itraj, index_lk, :, :] = self.mols[itraj].pos[:, :]
                                 else:
-                                    self.center[itraj, index_lk, iat, isp] = numer[index_lk, iat, isp] / deno[index_lk, iat, isp]
-                                if (self.l_crunch):
-                                    if (abs(deno_bo[index_lk, iat, isp]) <= self.small):
-                                        self.center_bo[itraj, index_lk, iat, isp] = self.mols[itraj].pos[iat, isp]
-                                    else:
-                                        self.center_bo[itraj, index_lk, iat, isp] = numer_bo[index_lk, iat, isp] / deno_bo[index_lk, iat, isp]
-
-            self.intercept[:, :, :, :] = self.slope[:, :, :, :] * self.center[:, : ,: ,:]
-            if (self.l_crunch):
-                self.intercept_bo[:, :, :, :] = self.slope_bo[:, :, :, :] * self.center_bo[:, : ,: ,:]
-
-        else:
-            # Center is not actually used. Just to check.
-            for itraj in range(self.ntrajs):
-                for iat in range(self.nat_qm):
-                    for isp in range(self.ndim):
-                        if (self.l_traj_gaussian):
-                            self.intercept[itraj, :, iat, isp] = 0.0
-                            if (self.g_i[itraj] / self.ntrajs < self.small):
-                                self.intercept[itraj, :, iat, isp] = 0.0
-                                self.center[itraj, :, iat, isp] = self.mols[itraj].pos[iat, isp]
-                            else:
-                                for jtraj in range(self.ntrajs):
-                                    self.intercept[itraj, :, iat, isp] += -1.0 * \
-                                        np.sum((self.prod_g_ij[:, itraj, jtraj] * self.mols[jtraj].pos[iat, isp]) / self.sigma[:, iat, isp] ** 2) / self.g_i[itraj]
-                        else:
-                            self.intercept[itraj, :, iat, isp] = - 1.0 * \
-                                np.sum(self.pseudo_pop[:, itraj] * (self.avg_R[:, iat, isp] / self.sigma[:, iat, isp] ** 2))
-                
-                        if (abs(self.slope[itraj, 0, iat, isp]) < self.small):
-                            self.center[itraj, :, iat, isp] = self.mols[itraj].pos[iat, isp]
-                        else:
-                            self.center[itraj, :, iat, isp] = self.intercept[itraj, :, iat, isp] / self.slope[itraj, :, iat, isp]
-
-            if (self.l_crunch):
-                index_lk = -1
-                for ist in range(self.nst):
-                    for jst in range(ist+1, self.nst):
-                        index_lk += 1
-                        for itraj in range(self.ntrajs):
-                            for iat in range(self.nat_qm):
-                                for isp in range(self.ndim):
-                                    if (self.sigma[ist, iat, isp] ** 2 < self.small or self.sigma[jst, iat, isp] ** 2 < self.small):
-                                        self.intercept_bo[itraj, index_lk, :, :] = 0.0
-                                        self.center_bo[itraj, index_lk, :, :] = self.mols[itraj].pos[:, :]
-                                    else:
-                                        if (self.l_traj_gaussian):
+                                    if (self.l_traj_gaussian):
+                                        self.intercept_bo[itraj, index_lk, iat, isp] = 0.0
+                                        if (self.g_i_I[ist, itraj] / self.ntrajs < self.small or self.g_i_I[jst, itraj] / self.ntrajs < self.small):
                                             self.intercept_bo[itraj, index_lk, iat, isp] = 0.0
-                                            if (self.prod_g_i[ist, itraj] / self.ntrajs < self.small or self.prod_g_i[jst, itraj] / self.ntrajs < self.small):
-                                                self.intercept_bo[itraj, index_lk, iat, isp] = 0.0
-                                                self.slope_bo[itraj, index_lk, iat, isp] = 0.0
-                                            else:
-                                                for jtraj in range(self.ntrajs):
-                                                    self.intercept_bo[itraj, index_lk, iat, isp] += -1.0 *\
-                                                        (self.prod_g_ij[ist, itraj, jtraj] * self.mols[jtraj].pos[iat, isp]) / self.sigma[ist, iat, isp] ** 2 / self.prod_g_i[ist, itraj]
-                                                    self.intercept_bo[itraj, index_lk, iat, isp] += -1.0 *\
-                                                        (self.prod_g_ij[jst, itraj, jtraj] * self.mols[jtraj].pos[iat, isp]) / self.sigma[jst, iat, isp] ** 2 / self.prod_g_i[jst, itraj]
-                                            
+                                            self.slope_bo[itraj, index_lk, iat, isp] = 0.0
                                         else:
-                                            self.intercept_bo[itraj, index_lk, iat, isp] = - 1.0 * \
-                                                (self.avg_R[ist, iat, isp] / self.sigma[ist, iat, isp] ** 2 + self.avg_R[jst, iat, isp] / self.sigma[jst, iat, isp] ** 2)                                
-                                    if (abs(self.slope_bo[itraj, index_lk, iat, isp]) < self.small):
-                                        self.center_bo[itraj, index_lk, iat, isp] = self.mols[itraj].pos[iat, isp]
+                                            for jtraj in range(self.ntrajs):
+                                                self.intercept_bo[itraj, index_lk, iat, isp] += -1.0 *\
+                                                    (self.g_i_IJ[ist, itraj, jtraj] * self.mols[jtraj].pos[iat, isp]) / self.sigma[ist, iat, isp] ** 2 / self.g_i_I[ist, itraj]
+                                                self.intercept_bo[itraj, index_lk, iat, isp] += -1.0 *\
+                                                    (self.g_i_IJ[jst, itraj, jtraj] * self.mols[jtraj].pos[iat, isp]) / self.sigma[jst, iat, isp] ** 2 / self.g_i_I[jst, itraj]
+                                        
                                     else:
-                                        self.center_bo[itraj, index_lk, iat, isp] = self.intercept_bo[itraj, index_lk, iat, isp] / self.slope_bo[itraj, index_lk, iat, isp]
+                                        self.intercept_bo[itraj, index_lk, iat, isp] = - 1.0 * \
+                                            (self.avg_R[ist, iat, isp] / self.sigma[ist, iat, isp] ** 2 + self.avg_R[jst, iat, isp] / self.sigma[jst, iat, isp] ** 2)                                
+                                if (abs(self.slope_bo[itraj, index_lk, iat, isp]) < self.small):
+                                    self.center_bo[itraj, index_lk, iat, isp] = self.mols[itraj].pos[iat, isp]
+                                else:
+                                    self.center_bo[itraj, index_lk, iat, isp] = self.intercept_bo[itraj, index_lk, iat, isp] / self.slope_bo[itraj, index_lk, iat, isp]
 
     def check_istates(self):
         """ Routine to check istates and init_coefs
@@ -964,6 +896,20 @@ class CTv2(MQC):
                     #typewriter(tmp, unixmd_dir, f"SIGMA", "a")
             
             # Write quantum momenta
+            tmp = f'{self.nat_qm:6d}\n{"":2s}Step:{istep + 1:6d}{"":12s}Momentum (au)' + \
+                "".join(["\n" + f'{self.mol.symbols[iat]:5s}' + \
+                "".join([f'{self.qmom[itrajectory, iat, idim]:15.8f}' for idim in range(self.ndim)]) for iat in range(self.nat_qm)])
+            typewriter(tmp, unixmd_dir, f"QMOM", "a")
+            tmp = f'{self.nat_qm:6d}\n{"":2s}Step:{istep + 1:6d}{"":12s}Slope' + \
+                "".join(["\n" + f'{self.mol.symbols[iat]:5s}' + \
+                "".join([f'{self.slope[itrajectory, iat, idim]:15.8f}' for idim in range(self.ndim)]) for iat in range(self.nat_qm)])
+            typewriter(tmp, unixmd_dir, f"SLOPE", "a")
+            
+            tmp = f'{self.nat_qm:6d}\n{"":2s}Step:{istep + 1:6d}{"":12s}Intercept' + \
+                "".join(["\n" + f'{self.mol.symbols[iat]:5s}' + \
+                "".join([f'{self.intercept[itrajectory, iat, idim]:15.8f}' for idim in range(self.ndim)]) for iat in range(self.nat_qm)])
+            typewriter(tmp, unixmd_dir, f"INTERCEPT", "a")
+
             index_lk = -1
             for ist in range(self.nst):
                 for jst in range(ist + 1, self.nst):
@@ -972,22 +918,7 @@ class CTv2(MQC):
                     #    "".join(["\n" + f'{self.mol.symbols[iat]:5s}' + \
                     #    "".join([f'{self.center_lk[itrajectory, index_lk, iat, idim]:15.8f}' for idim in range(self.ndim)]) for iat in range(self.nat_qm)])
                     #typewriter(tmp, unixmd_dir, f"CENTER_{ist}_{jst}", "a")
-
-                    tmp = f'{self.nat_qm:6d}\n{"":2s}Step:{istep + 1:6d}{"":12s}Momentum (au)' + \
-                        "".join(["\n" + f'{self.mol.symbols[iat]:5s}' + \
-                        "".join([f'{self.qmom[itrajectory, index_lk, iat, idim]:15.8f}' for idim in range(self.ndim)]) for iat in range(self.nat_qm)])
-                    typewriter(tmp, unixmd_dir, f"QMOM_{ist}_{jst}", "a")
                     
-                    tmp = f'{self.nat_qm:6d}\n{"":2s}Step:{istep + 1:6d}{"":12s}Slope' + \
-                        "".join(["\n" + f'{self.mol.symbols[iat]:5s}' + \
-                        "".join([f'{self.slope[itrajectory, index_lk, iat, idim]:15.8f}' for idim in range(self.ndim)]) for iat in range(self.nat_qm)])
-                    typewriter(tmp, unixmd_dir, f"SLOPE_{ist}_{jst}", "a")
-                    
-                    tmp = f'{self.nat_qm:6d}\n{"":2s}Step:{istep + 1:6d}{"":12s}Intercept' + \
-                        "".join(["\n" + f'{self.mol.symbols[iat]:5s}' + \
-                        "".join([f'{self.intercept[itrajectory, index_lk, iat, idim]:15.8f}' for idim in range(self.ndim)]) for iat in range(self.nat_qm)])
-                    typewriter(tmp, unixmd_dir, f"INTERCEPT_{ist}_{jst}", "a")
-
                     tmp = f'{self.nat_qm:6d}\n{"":2s}Step:{istep + 1:6d}{"":12s}Momentum (au)' + \
                         "".join(["\n" + f'{self.mol.symbols[iat]:5s}' + \
                         "".join([f'{self.qmom_bo[itrajectory, index_lk, iat, idim]:15.8f}' for idim in range(self.ndim)]) for iat in range(self.nat_qm)])
